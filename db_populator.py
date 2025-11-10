@@ -220,7 +220,7 @@ class TaskerAssignmentDBPopulator:
             return False
         
         # Convert timezones
-        df = self.convert_timezone(df)
+        # df = self.convert_timezone(df)
         
         # Validate CSV columns
         required_columns = [
