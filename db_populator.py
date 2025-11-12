@@ -1,6 +1,6 @@
 import pandas as pd
 import psycopg2
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import os
 from dotenv import load_dotenv
 import logging
@@ -91,45 +91,37 @@ class TaskerAssignmentDBPopulator:
     
     def convert_timezone(self, df):
         """
-        Convert latest_schedule_start_at to America/New_York timezone.
+        Convert latest_schedule_start_at to datetime format, keeping it timezone-naive.
+        Stores timestamps exactly as they appear in the CSV file.
         """
         try:
             # Convert latest_schedule_start_at to datetime if it's not already
             df['latest_schedule_start_at'] = pd.to_datetime(df['latest_schedule_start_at'])
             
-            # Get the target timezone (America/New_York)
-            ny_tz = pytz.timezone('America/New_York')
+            # If timestamps have timezone info, remove it to keep them naive
+            if df['latest_schedule_start_at'].dt.tz is not None:
+                # Convert to naive datetime by removing timezone info
+                df['latest_schedule_start_at'] = df['latest_schedule_start_at'].dt.tz_localize(None)
+            elif df['latest_schedule_start_at'].dt.tz.isna().any():
+                # Some have timezone, some don't - remove timezone from those that have it
+                mask_tz_aware = ~df['latest_schedule_start_at'].dt.tz.isna()
+                df.loc[mask_tz_aware, 'latest_schedule_start_at'] = df.loc[mask_tz_aware, 'latest_schedule_start_at'].dt.tz_localize(None)
             
-            # Create a function to convert timezone for each row
-            def convert_to_ny_timezone(row):
-                try:
-                    if pd.isna(row['latest_schedule_start_at']):
-                        return row['latest_schedule_start_at']
-                    
-                    dt = row['latest_schedule_start_at']
-                    
-                    # If the datetime is naive (no timezone info), assume it's UTC
-                    if dt.tzinfo is None:
-                        # Assume the datetime is in UTC and localize it
-                        utc_dt = pytz.utc.localize(dt)
-                    else:
-                        utc_dt = dt
-                    
-                    # Convert to America/New_York timezone
-                    return utc_dt.astimezone(ny_tz)
-                    
-                except Exception as e:
-                    logger.warning(f"Timezone conversion failed for row: {e}")
-                    return row['latest_schedule_start_at']
+            # Log a sample to verify format
+            sample_dt = df['latest_schedule_start_at'].iloc[0] if len(df) > 0 else None
+            if sample_dt is not None and pd.notna(sample_dt):
+                logger.info(f"Sample timestamp (timezone-naive): {sample_dt}")
             
-            # Apply timezone conversion
-            df['latest_schedule_start_at'] = df.apply(convert_to_ny_timezone, axis=1)
-            
-            logger.info("Successfully converted timestamps to America/New_York timezone")
+            logger.info("Successfully converted timestamps to timezone-naive format")
             return df
             
         except Exception as e:
-            logger.error(f"Error converting timezones: {e}")
+            logger.error(f"Error processing timestamps: {e}")
+            # Fallback: try to ensure datetime type is preserved
+            try:
+                df['latest_schedule_start_at'] = pd.to_datetime(df['latest_schedule_start_at'])
+            except Exception:
+                pass
             return df
     
     def populate_tasks_table(self, df, replace_existing=False):
@@ -149,11 +141,29 @@ class TaskerAssignmentDBPopulator:
             # Extract only the required columns
             tasks_df = df[tasks_columns].copy()
             
+            # Ensure latest_schedule_start_at is timezone-naive (as received from CSV)
+            if 'latest_schedule_start_at' in tasks_df.columns:
+                # Ensure it's timezone-naive (should be from convert_timezone)
+                if tasks_df['latest_schedule_start_at'].dt.tz is not None:
+                    # Remove timezone if present
+                    tasks_df['latest_schedule_start_at'] = tasks_df['latest_schedule_start_at'].dt.tz_localize(None)
+                elif tasks_df['latest_schedule_start_at'].dt.tz.isna().any():
+                    # Some have timezone, remove it
+                    mask_tz_aware = ~tasks_df['latest_schedule_start_at'].dt.tz.isna()
+                    tasks_df.loc[mask_tz_aware, 'latest_schedule_start_at'] = tasks_df.loc[mask_tz_aware, 'latest_schedule_start_at'].dt.tz_localize(None)
+                
+                # Log what we're about to insert
+                sample_before = tasks_df['latest_schedule_start_at'].iloc[0] if len(tasks_df) > 0 else None
+                if sample_before is not None and pd.notna(sample_before):
+                    logger.info(f"Sample timestamp before SQL insert (timezone-naive): {sample_before}")
+            
             # No need to remove duplicates - each job_id should be unique
             # The database will handle any primary key constraints
             
             # Insert data into tasks table
             if_exists_mode = 'replace' if replace_existing else 'append'
+            
+            # Insert using standard method - timestamps will be stored as-is (timezone-naive)
             tasks_df.to_sql(
                 self.tasks_table, 
                 self.engine, 
@@ -163,6 +173,18 @@ class TaskerAssignmentDBPopulator:
             )
             
             logger.info(f"Successfully populated {self.tasks_table} with {len(tasks_df)} records")
+            
+            # Verify what was actually stored by querying back
+            if 'latest_schedule_start_at' in tasks_df.columns and len(tasks_df) > 0:
+                try:
+                    with self.engine.connect() as conn:
+                        result = conn.execute(text(f"SELECT latest_schedule_start_at FROM {self.tasks_table} LIMIT 1"))
+                        stored_value = result.fetchone()[0]
+                        logger.info(f"Verified stored timestamp: {stored_value}")
+                        conn.commit()
+                except Exception as e:
+                    logger.warning(f"Could not verify stored timestamp: {e}")
+            
             return True
             
         except Exception as e:
