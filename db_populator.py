@@ -84,6 +84,14 @@ class TaskerAssignmentDBPopulator:
             df = df.rename(columns=column_mapping)
             logger.info("Successfully standardized column names")
             
+            # Fill empty duration_hours with default value of 2 hours
+            if 'duration_hours' in df.columns:
+                empty_count = df['duration_hours'].isna().sum() + (df['duration_hours'] == '').sum()
+                df['duration_hours'] = df['duration_hours'].replace('', None)
+                df['duration_hours'] = df['duration_hours'].fillna(2.0)
+                if empty_count > 0:
+                    logger.info(f"Filled {empty_count} empty duration_hours values with default of 2.0 hours")
+            
             return df
         except Exception as e:
             logger.error(f"Failed to read CSV file: {e}")
@@ -102,10 +110,6 @@ class TaskerAssignmentDBPopulator:
             if df['latest_schedule_start_at'].dt.tz is not None:
                 # Convert to naive datetime by removing timezone info
                 df['latest_schedule_start_at'] = df['latest_schedule_start_at'].dt.tz_localize(None)
-            elif df['latest_schedule_start_at'].dt.tz.isna().any():
-                # Some have timezone, some don't - remove timezone from those that have it
-                mask_tz_aware = ~df['latest_schedule_start_at'].dt.tz.isna()
-                df.loc[mask_tz_aware, 'latest_schedule_start_at'] = df.loc[mask_tz_aware, 'latest_schedule_start_at'].dt.tz_localize(None)
             
             # Log a sample to verify format
             sample_dt = df['latest_schedule_start_at'].iloc[0] if len(df) > 0 else None
@@ -147,10 +151,6 @@ class TaskerAssignmentDBPopulator:
                 if tasks_df['latest_schedule_start_at'].dt.tz is not None:
                     # Remove timezone if present
                     tasks_df['latest_schedule_start_at'] = tasks_df['latest_schedule_start_at'].dt.tz_localize(None)
-                elif tasks_df['latest_schedule_start_at'].dt.tz.isna().any():
-                    # Some have timezone, remove it
-                    mask_tz_aware = ~tasks_df['latest_schedule_start_at'].dt.tz.isna()
-                    tasks_df.loc[mask_tz_aware, 'latest_schedule_start_at'] = tasks_df.loc[mask_tz_aware, 'latest_schedule_start_at'].dt.tz_localize(None)
                 
                 # Log what we're about to insert
                 sample_before = tasks_df['latest_schedule_start_at'].iloc[0] if len(tasks_df) > 0 else None
