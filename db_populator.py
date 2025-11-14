@@ -77,7 +77,9 @@ class TaskerAssignmentDBPopulator:
                 'Marketplace Key': 'marketplace_key',
                 'Description': 'description',
                 'Duration Hours': 'duration_hours',
-                'Tasker Take Home Pay': 'tasker_take_home_pay'
+                'Tasker Take Home Pay': 'tasker_take_home_pay',
+                'Locale': 'locale',
+                'Trimmed Address': 'trimmed_address'
             }
             
             # Rename columns to standardized names
@@ -127,6 +129,17 @@ class TaskerAssignmentDBPopulator:
             except Exception:
                 pass
             return df
+
+    def remove_apt_from_address(self, address):
+        """Remove 'apt' from the address."""
+        final_address = ''
+        for word in address.split(' '):
+            if word.lower() not in ['apt', 'unit', 'suite', 'building', 'floor', 'room', "apartment", "apt."]:
+                final_address += word + ' '
+            else:
+                break
+        final_address = final_address.strip()
+        return final_address
     
     def populate_tasks_table(self, df, replace_existing=False):
         """
@@ -139,7 +152,7 @@ class TaskerAssignmentDBPopulator:
                 'tasker_id', 'metro_name', 'job_id', 'postal_code', 'latitude', 'longitude', 
                 'country_key', 'latest_schedule_start_at', 'time_zone', 
                 'is_job_bundle', 'is_assigned', 'is_accepted', 'is_scheduled', 
-                'marketplace_key', 'description', 'duration_hours', 'tasker_take_home_pay'
+                'marketplace_key', 'description', 'duration_hours', 'tasker_take_home_pay', 'locale', 'trimmed_address'
             ]
             
             # Extract only the required columns
@@ -156,6 +169,44 @@ class TaskerAssignmentDBPopulator:
                 sample_before = tasks_df['latest_schedule_start_at'].iloc[0] if len(tasks_df) > 0 else None
                 if sample_before is not None and pd.notna(sample_before):
                     logger.info(f"Sample timestamp before SQL insert (timezone-naive): {sample_before}")
+
+            if 'locale' in tasks_df.columns:
+                # Normalize locale values - extract first 2 characters if longer, default to 'en'
+                def normalize_locale(locale_val):
+                    if pd.isna(locale_val) or locale_val == '':
+                        return 'en'
+                    locale_str = str(locale_val).lower()
+                    if 'en' in locale_str:
+                        return 'en'
+                    elif 'es' in locale_str:
+                        return 'es'
+                    elif 'fr' in locale_str:
+                        return 'fr'
+                    elif 'de' in locale_str:
+                        return 'de'
+                    elif 'it' in locale_str:
+                        return 'it'
+                    else:
+                        return 'en'
+                
+                tasks_df['locale'] = tasks_df['locale'].apply(normalize_locale)
+
+            if 'trimmed_address' in tasks_df.columns:
+                # Fill NaN values with empty string
+                tasks_df['trimmed_address'] = tasks_df['trimmed_address'].fillna('')
+                
+                # Split by comma and take first part, then remove apt/unit/etc
+                def process_address(address):
+                    if pd.isna(address) or address == '':
+                        return ''
+                    # Split by comma and take first part
+                    address_str = str(address).split(',')[0].strip()
+                    # Remove apt/unit/etc if present
+                    if any(word in address_str.lower() for word in ['apt', 'unit', 'suite', 'building', 'floor', 'room', 'apartment', 'apt.']):
+                        return self.remove_apt_from_address(address_str)
+                    return address_str
+                
+                tasks_df['trimmed_address'] = tasks_df['trimmed_address'].apply(process_address)
             
             # No need to remove duplicates - each job_id should be unique
             # The database will handle any primary key constraints
@@ -203,11 +254,36 @@ class TaskerAssignmentDBPopulator:
                 'tenure_months', 'lifetime_submitted_invoices_bucket'
             ]
             
+            # Add locale if it exists in the dataframe
+            if 'locale' in df.columns:
+                tasker_columns.append('locale')
+            
             # Extract only the required columns
             tasker_df = df[tasker_columns].copy()
             
             # Remove duplicates based on tasker_id (each tasker should appear only once)
             tasker_df = tasker_df.drop_duplicates(subset=['tasker_id'])
+            
+            # Normalize locale values if locale column exists
+            if 'locale' in tasker_df.columns:
+                def normalize_locale(locale_val):
+                    if pd.isna(locale_val) or locale_val == '':
+                        return 'en'
+                    locale_str = str(locale_val).lower()
+                    if 'en' in locale_str:
+                        return 'en'
+                    elif 'es' in locale_str:
+                        return 'es'
+                    elif 'fr' in locale_str:
+                        return 'fr'
+                    elif 'de' in locale_str:
+                        return 'de'
+                    elif 'it' in locale_str:
+                        return 'it'
+                    else:
+                        return 'en'
+                
+                tasker_df['locale'] = tasker_df['locale'].apply(normalize_locale)
             
             # Insert data into tasker data table
             if_exists_mode = 'replace' if replace_existing else 'append'
@@ -253,7 +329,7 @@ class TaskerAssignmentDBPopulator:
             'postal_code', 'latitude', 'longitude', 'country_key', 
             'latest_schedule_start_at', 'time_zone', 'is_job_bundle', 
             'is_assigned', 'is_accepted', 'is_scheduled', 'marketplace_key', 
-            'description', 'duration_hours', 'tasker_take_home_pay'
+            'description', 'duration_hours', 'tasker_take_home_pay', 'locale', 'trimmed_address'
         ]
         
         missing_columns = [col for col in required_columns if col not in df.columns]
